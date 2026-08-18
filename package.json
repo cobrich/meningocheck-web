@@ -1,0 +1,22 @@
+{
+  "name": "meningocheck-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MeningoCheck/Ai web application",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "express-rate-limit": "^8.0.1",
+    "helmet": "^8.1.0",
+    "nodemailer": "^9.0.5",
+    "pg": "^8.16.3"
+  }
+}

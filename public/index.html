@@ -67,11 +67,25 @@ const SYMPTOMS = [
 ];
 const C = { p50:'#EAF3FC', p100:'#F4F9FE', border:'#C3DDF5', border2:'#8FC0EB', mid:'#3C86C7', strong:'#1B5FA0', dark:'#0C4478', darker:'#042C53', muted:'#7FA9D6', green:'#34A876', greenBg:'#E6F7EF' };
 
-let usersDb = {};
-let state = { page:'landing', step:0, age:'', gender:'', duration:'', symptoms:{}, other:'', history:[], user:null, pendingEmail:null, pendingName:null, pendingPassword:null, generatedCode:null, authError:null, codeError:null };
+let token = localStorage.getItem('meningocheck_token');
+let state = { page:'landing', step:0, age:'', gender:'', duration:'', symptoms:{}, other:'', history:[], user:null, pendingEmail:null, devCode:null, lastResult:null, authError:null, codeError:null };
 
 function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(); return d.firstChild; }
-function genCode(){ return String(Math.floor(100000 + Math.random()*900000)); }
+function esc(value){ return String(value ?? '').replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
+async function api(path, options={}){
+  const headers = {'Content-Type':'application/json', ...(options.headers||{})};
+  if(token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(path, {...options, headers});
+  const data = await response.json().catch(()=>({}));
+  if(response.status===401 && token){ token=null; state.user=null; localStorage.removeItem('meningocheck_token'); }
+  if(!response.ok) throw new Error(data.error || 'Не удалось связаться с сервером.');
+  return data;
+}
+function setBusy(button, busy){ button.disabled=busy; button.style.opacity=busy?'0.65':'1'; }
+async function loadHistory(){
+  const data = await api('/api/assessments');
+  state.history = data.assessments.map(a=>({...a, date:new Date(a.createdAt).toLocaleString('ru-RU')}));
+}
 
 function calcRisk(){
   let score=0, dangerCount=0, hits=[];
@@ -111,7 +125,7 @@ function wireNav(container){
     n.onclick = ()=>{ state.page = n.dataset.nav; if(state.page==='assessment') state.step=0; state.authError=null; state.codeError=null; render(); };
   });
   const lo = container.querySelector('[data-logout]');
-  if(lo) lo.onclick = ()=>{ state.user=null; state.page='landing'; render(); };
+  if(lo) lo.onclick = async ()=>{ try{ await api('/api/auth/logout',{method:'POST'}); }catch{} token=null; localStorage.removeItem('meningocheck_token'); state.user=null; state.history=[]; state.page='landing'; render(); };
 }
 
 function render(){
@@ -184,14 +198,15 @@ function viewRegister(){
         <div><label style="font-size:11px;color:${C.mid};">Email</label><input id="email" type="email" placeholder="name@example.com"/></div>
         <div><label style="font-size:11px;color:${C.mid};">Пароль</label><input id="password" type="password" placeholder="Минимум 8 символов"/></div>
       </div>
-      ${state.authError ? `<p style="color:#B3261E;font-size:11px;margin:6px 0;">${state.authError}</p>` : ''}
+      ${state.authError ? `<p style="color:#B3261E;font-size:11px;margin:6px 0;">${esc(state.authError)}</p>` : ''}
       <button id="submit" style="width:100%;background:${C.strong};color:#fff;border:none;padding:11px;border-radius:10px;font-size:13px;font-weight:700;margin-top:10px;">Отправить код на почту</button>
       <p style="font-size:11px;color:${C.mid};margin-top:14px;text-align:center;">Уже есть аккаунт? <span data-nav="login" style="color:${C.strong};cursor:pointer;font-weight:600;">Войти</span></p>
     </div>
   `);
   const w = card(inner);
   wireNav(w);
-  w.querySelector('#submit').onclick = ()=>{
+  w.querySelector('#submit').onclick = async ()=>{
+    const button = w.querySelector('#submit');
     const name = w.querySelector('#name').value.trim();
     const email = w.querySelector('#email').value.trim().toLowerCase();
     const password = w.querySelector('#password').value;
@@ -199,19 +214,12 @@ function viewRegister(){
       state.authError = 'Проверьте: имя, корректный email и пароль от 8 символов.';
       render(); return;
     }
-    if(usersDb[email] && usersDb[email].verified){
-      state.authError = 'Пользователь с таким email уже зарегистрирован.';
-      render(); return;
-    }
-    const code = genCode();
-    usersDb[email] = { name, email, password, verified:false, code };
-    state.pendingEmail = email;
-    state.pendingName = name;
-    state.generatedCode = code;
-    state.authError = null;
-    state.codeError = null;
-    state.page='verify';
-    render();
+    setBusy(button,true);
+    try{
+      const data = await api('/api/auth/register',{method:'POST',body:JSON.stringify({name,email,password})});
+      state.pendingEmail = data.email; state.devCode = data.devCode || null;
+      state.authError = null; state.codeError = null; state.page='verify'; render();
+    }catch(error){ state.authError=error.message; render(); }
   };
   return w;
 }
@@ -222,33 +230,29 @@ function viewVerify(){
     <div style="text-align:center;width:100%;">
       <i class="ti ti-mail" style="font-size:24px;color:${C.strong}"></i>
       <p style="color:${C.dark};font-weight:700;margin:10px 0 4px;font-size:14px;">Введите код подтверждения</p>
-      <p style="font-size:11px;color:${C.mid};margin-bottom:6px;line-height:1.6;">Мы отправили 6-значный код на ${email}.</p>
-      <p style="font-size:11px;color:${C.muted};margin-bottom:16px;line-height:1.6;background:${C.p100};border-radius:8px;padding:8px;">Демо-режим без реального email-сервера: код показан здесь, чтобы вы могли проверить работу формы — <b style="color:${C.strong};letter-spacing:1px;">${state.generatedCode}</b></p>
+      <p style="font-size:11px;color:${C.mid};margin-bottom:16px;line-height:1.6;">Мы отправили 6-значный код на ${esc(email)}. Код действует 10 минут.</p>
+      ${state.devCode ? `<p style="font-size:11px;color:${C.muted};margin-bottom:16px;line-height:1.6;background:${C.p100};border-radius:8px;padding:8px;">Локальный режим: код — <b style="color:${C.strong};letter-spacing:1px;">${state.devCode}</b></p>` : ''}
       <input id="code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" style="text-align:center;letter-spacing:6px;font-size:18px;font-weight:700;max-width:200px;margin:0 auto 8px;"/>
-      ${state.codeError ? `<p style="color:#B3261E;font-size:11px;margin:4px 0 8px;">${state.codeError}</p>` : ''}
+      ${state.codeError ? `<p style="color:#B3261E;font-size:11px;margin:4px 0 8px;">${esc(state.codeError)}</p>` : ''}
       <button id="confirm" style="background:${C.strong};color:#fff;border:none;padding:9px 20px;border-radius:10px;font-size:13px;font-weight:700;margin-top:6px;">Подтвердить</button>
       <p style="font-size:11px;color:${C.mid};margin-top:12px;">Не пришёл код? <span id="resend" style="color:${C.strong};cursor:pointer;font-weight:600;">Отправить снова</span></p>
     </div>
   `);
   const w = card(inner);
-  w.querySelector('#confirm').onclick = ()=>{
+  w.querySelector('#confirm').onclick = async ()=>{
+    const button=w.querySelector('#confirm');
     const entered = w.querySelector('#code').value.trim();
-    if(entered !== usersDb[email].code){
-      state.codeError = 'Неверный код. Попробуйте ещё раз.';
-      render(); return;
-    }
-    usersDb[email].verified = true;
-    state.user = { name: usersDb[email].name, email };
-    state.codeError = null;
-    state.page='assessment'; state.step=0;
-    render();
+    if(!/^\d{6}$/.test(entered)){ state.codeError='Введите 6 цифр.'; render(); return; }
+    setBusy(button,true);
+    try{
+      const data=await api('/api/auth/verify',{method:'POST',body:JSON.stringify({email,code:entered})});
+      token=data.token; localStorage.setItem('meningocheck_token',token); state.user=data.user;
+      state.codeError=null; state.page='assessment'; state.step=0; render();
+    }catch(error){ state.codeError=error.message; render(); }
   };
-  w.querySelector('#resend').onclick = ()=>{
-    const code = genCode();
-    usersDb[email].code = code;
-    state.generatedCode = code;
-    state.codeError = null;
-    render();
+  w.querySelector('#resend').onclick = async ()=>{
+    try{ await api('/api/auth/resend',{method:'POST',body:JSON.stringify({email})}); state.codeError='Новый код отправлен.'; render(); }
+    catch(error){ state.codeError=error.message; render(); }
   };
   return w;
 }
@@ -261,29 +265,23 @@ function viewLogin(){
         <div><label style="font-size:11px;color:${C.mid};">Email</label><input id="email" type="email" placeholder="name@example.com"/></div>
         <div><label style="font-size:11px;color:${C.mid};">Пароль</label><input id="password" type="password"/></div>
       </div>
-      ${state.authError ? `<p style="color:#B3261E;font-size:11px;margin:8px 0 0;">${state.authError}</p>` : ''}
+      ${state.authError ? `<p style="color:#B3261E;font-size:11px;margin:8px 0 0;">${esc(state.authError)}</p>` : ''}
       <button id="submit" style="width:100%;background:${C.strong};color:#fff;border:none;padding:11px;border-radius:10px;font-size:13px;font-weight:700;margin-top:14px;">Войти</button>
       <p style="font-size:11px;color:${C.mid};margin-top:14px;text-align:center;">Нет аккаунта? <span data-nav="register" style="color:${C.strong};cursor:pointer;font-weight:600;">Зарегистрироваться</span></p>
     </div>
   `);
   const w = card(inner);
   wireNav(w);
-  w.querySelector('#submit').onclick = ()=>{
+  w.querySelector('#submit').onclick = async ()=>{
+    const button=w.querySelector('#submit');
     const email = w.querySelector('#email').value.trim().toLowerCase();
     const password = w.querySelector('#password').value;
-    const u = usersDb[email];
-    if(!u || u.password!==password){
-      state.authError = 'Неверный email или пароль.';
-      render(); return;
-    }
-    if(!u.verified){
-      state.authError = 'Email ещё не подтверждён. Проверьте почту.';
-      render(); return;
-    }
-    state.user = { name:u.name, email };
-    state.authError=null;
-    state.page='dashboard';
-    render();
+    setBusy(button,true);
+    try{
+      const data=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email,password})});
+      token=data.token; localStorage.setItem('meningocheck_token',token); state.user=data.user;
+      await loadHistory(); state.authError=null; state.page='dashboard'; render();
+    }catch(error){ state.authError=error.message; render(); }
   };
   return w;
 }
@@ -317,6 +315,9 @@ function stepDemo(){
     state.age = w.querySelector('#age').value;
     state.gender = w.querySelector('#gender').value;
     state.duration = w.querySelector('#duration').value;
+    if(!Number.isInteger(Number(state.age)) || Number(state.age)<0 || Number(state.age)>120 || !state.gender || !Number.isInteger(Number(state.duration)) || Number(state.duration)<0 || Number(state.duration)>365){
+      alert('Проверьте возраст, пол и количество дней с начала симптомов.'); return;
+    }
     state.step=1; render();
   };
   return w;
@@ -330,7 +331,7 @@ function stepSymptoms(){
       <h3 style="color:${C.darker};margin-bottom:12px;font-size:16px;font-weight:700;">Отметьте симптомы</h3>
       <div id="grid" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:7px;margin-bottom:14px;width:100%;"></div>
       <label style="font-size:11px;color:${C.mid};">Другие симптомы</label>
-      <textarea id="other" rows="2" style="margin:6px 0 18px;">${state.other}</textarea>
+      <textarea id="other" rows="2" maxlength="1000" style="margin:6px 0 18px;">${esc(state.other)}</textarea>
       <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">
         <button id="back" style="background:#fff;color:${C.strong};border:1px solid ${C.border2};padding:9px 20px;border-radius:10px;font-size:13px;">Назад</button>
         <button id="finish" style="background:${C.strong};color:#fff;border:none;padding:9px 20px;border-radius:10px;font-size:13px;font-weight:600;">Показать результат</button>
@@ -349,17 +350,25 @@ function stepSymptoms(){
     grid.appendChild(row);
   });
   w.querySelector('#back').onclick = ()=>{ state.step=0; render(); };
-  w.querySelector('#finish').onclick = ()=>{
+  w.querySelector('#finish').onclick = async ()=>{
+    const button=w.querySelector('#finish');
     state.other = w.querySelector('#other').value;
-    const r = calcRisk();
-    state.history.unshift({date:'сегодня', pct:r.pct});
-    state.page='result'; render();
+    setBusy(button,true);
+    try{
+      const data=await api('/api/assessments',{method:'POST',body:JSON.stringify({
+        age:Number(state.age), gender:state.gender, duration:Number(state.duration),
+        symptoms:Object.keys(state.symptoms).filter(id=>state.symptoms[id]), other:state.other
+      })});
+      state.lastResult=data.assessment;
+      await loadHistory(); state.page='result'; render();
+    }catch(error){ alert(error.message); setBusy(button,false); }
   };
   return w;
 }
 
 function viewResult(){
-  const r = calcRisk();
+  const local = calcRisk();
+  const r = state.lastResult ? {...local,pct:state.lastResult.pct,emergency:state.lastResult.emergency} : local;
   const lvl = levelInfo(r.pct);
   const circ = 2*Math.PI*54, dash=(r.pct/100)*circ;
   const inner = el(`
@@ -387,7 +396,7 @@ function viewResult(){
       <p style="font-size:11px;color:${C.muted};margin-bottom:16px;line-height:1.5;">Это предварительная оценка, а не медицинский диагноз.</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap;">
         <button id="retry" style="background:#fff;color:${C.strong};border:1px solid ${C.border2};padding:9px 16px;border-radius:10px;font-size:12px;">Пройти ещё раз</button>
-        <button id="toDash" style="background:${C.strong};color:#fff;border:none;padding:9px 16px;border-radius:10px;font-size:12px;font-weight:600;">Сохранить в кабинет</button>
+        <button id="toDash" style="background:${C.strong};color:#fff;border:none;padding:9px 16px;border-radius:10px;font-size:12px;font-weight:600;">Перейти в кабинет</button>
       </div>
     </div>
   `);
@@ -403,8 +412,8 @@ function viewDashboard(){
   const inner = el(`
     <div style="width:100%;">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px;">
-        <div style="width:38px;height:38px;border-radius:50%;background:${C.p50};display:flex;align-items:center;justify-content:center;font-weight:700;color:${C.strong};font-size:12px;flex-shrink:0;">${(state.user.name||'?').slice(0,2).toUpperCase()}</div>
-        <div style="min-width:0;"><p style="font-weight:700;margin:0;font-size:13px;color:${C.darker};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${state.user.name}</p><p style="font-size:11px;color:${C.muted};margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${state.user.email}</p></div>
+        <div style="width:38px;height:38px;border-radius:50%;background:${C.p50};display:flex;align-items:center;justify-content:center;font-weight:700;color:${C.strong};font-size:12px;flex-shrink:0;">${esc((state.user.name||'?').slice(0,2).toUpperCase())}</div>
+        <div style="min-width:0;"><p style="font-weight:700;margin:0;font-size:13px;color:${C.darker};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(state.user.name)}</p><p style="font-size:11px;color:${C.muted};margin:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(state.user.email)}</p></div>
       </div>
       <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-bottom:18px;">
         <div style="background:${C.p100};border-radius:10px;padding:11px;"><p style="font-size:10px;color:${C.mid};margin:0 0 3px;">Проверок</p><p style="font-size:18px;font-weight:700;margin:0;color:${C.darker};">${state.history.length}</p></div>
@@ -419,7 +428,15 @@ function viewDashboard(){
   return card(inner);
 }
 
-render();
+async function bootstrap(){
+  if(token){
+    try{
+      const data=await api('/api/me'); state.user=data.user; await loadHistory();
+    }catch{ token=null; localStorage.removeItem('meningocheck_token'); }
+  }
+  render();
+}
+bootstrap();
 </script>
 </body>
 </html>
