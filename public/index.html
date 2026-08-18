@@ -78,7 +78,12 @@ async function api(path, options={}){
   const response = await fetch(path, {...options, headers});
   const data = await response.json().catch(()=>({}));
   if(response.status===401 && token){ token=null; state.user=null; localStorage.removeItem('meningocheck_token'); }
-  if(!response.ok) throw new Error(data.error || 'Не удалось связаться с сервером.');
+  if(!response.ok){
+    const reference = data.requestId ? ` Код ошибки: ${data.requestId}` : '';
+    const error = new Error((data.error || 'Не удалось связаться с сервером.') + reference);
+    error.code = data.errorCode;
+    throw error;
+  }
   return data;
 }
 function setBusy(button, busy){ button.disabled=busy; button.style.opacity=busy?'0.65':'1'; }

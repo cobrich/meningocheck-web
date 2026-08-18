@@ -13,6 +13,14 @@ const app = express();
 const port = Number(process.env.PORT || 3000);
 const production = process.env.NODE_ENV === 'production';
 
+function log(level, event, fields = {}) {
+  const entry = { timestamp: new Date().toISOString(), level, event, ...fields };
+  const output = JSON.stringify(entry);
+  if (level === 'error') console.error(output);
+  else if (level === 'warn') console.warn(output);
+  else console.log(output);
+}
+
 if (!process.env.DATABASE_URL) {
   console.error('DATABASE_URL is required');
   process.exit(1);
@@ -27,6 +35,22 @@ const pool = new Pool({
 app.set('trust proxy', 1);
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '32kb' }));
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+  req.requestId = String(req.headers['x-request-id'] || crypto.randomUUID()).slice(0, 100);
+  res.setHeader('X-Request-Id', req.requestId);
+  res.on('finish', () => {
+    if (req.path === '/api/health') return;
+    log(res.statusCode >= 500 ? 'error' : res.statusCode >= 400 ? 'warn' : 'info', 'http.request', {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      status: res.statusCode,
+      durationMs: Date.now() - startedAt,
+    });
+  });
+  next();
+});
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -77,16 +101,29 @@ function smtpTransport() {
 async function sendVerificationCode(email, code) {
   const transport = smtpTransport();
   if (!transport) {
-    if (production) throw new Error('SMTP is not configured');
-    console.log(`[development] Verification code for ${email}: ${code}`);
+    if (production) {
+      const error = new Error('SMTP is not configured');
+      error.code = 'SMTP_NOT_CONFIGURED';
+      throw error;
+    }
+    log('info', 'smtp.development_code', { emailDomain: email.split('@')[1], code });
     return false;
   }
-  await transport.sendMail({
-    from: process.env.SMTP_FROM || process.env.SMTP_USER,
-    to: email,
-    subject: 'Код подтверждения MeningoCheck/Ai',
-    text: `Ваш код подтверждения: ${code}. Код действует 10 минут.`,
-  });
+  try {
+    const info = await transport.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: email,
+      subject: 'Код подтверждения MeningoCheck/Ai',
+      text: `Ваш код подтверждения: ${code}. Код действует 10 минут.`,
+    });
+    log('info', 'smtp.message_sent', {
+      messageId: info.messageId,
+      recipientDomain: email.split('@')[1],
+    });
+  } catch (error) {
+    error.context = 'smtp';
+    throw error;
+  }
   return true;
 }
 
@@ -288,11 +325,38 @@ app.get('/api/health', async (_req, res) => {
 app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] }));
 app.get('*splat', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-app.use((error, _req, res, _next) => {
-  console.error(error);
-  const smtpMissing = error.message === 'SMTP is not configured';
-  res.status(smtpMissing ? 503 : 500).json({
-    error: smtpMissing ? 'Отправка почты пока не настроена.' : 'Внутренняя ошибка сервера.',
+function publicError(error) {
+  if (error.code === 'SMTP_NOT_CONFIGURED') {
+    return { status: 503, code: 'SMTP_NOT_CONFIGURED', message: 'Отправка почты пока не настроена.' };
+  }
+  if (error.context === 'smtp' && error.code === 'EAUTH') {
+    return { status: 503, code: 'SMTP_AUTH_FAILED', message: 'Почтовый сервер отклонил авторизацию.' };
+  }
+  if (error.context === 'smtp') {
+    return { status: 503, code: 'SMTP_SEND_FAILED', message: 'Не удалось отправить письмо. Попробуйте позже.' };
+  }
+  if (error.code && /^[0-9A-Z]{5}$/.test(String(error.code))) {
+    return { status: 503, code: 'DATABASE_ERROR', message: 'База данных временно недоступна.' };
+  }
+  return { status: 500, code: 'INTERNAL_ERROR', message: 'Внутренняя ошибка сервера.' };
+}
+
+app.use((error, req, res, _next) => {
+  const safe = publicError(error);
+  log('error', 'application.error', {
+    requestId: req.requestId,
+    method: req.method,
+    path: req.path,
+    errorCode: safe.code,
+    sourceCode: error.code,
+    errorName: error.name,
+    message: error.message,
+    stack: error.stack,
+  });
+  res.status(safe.status).json({
+    error: safe.message,
+    errorCode: safe.code,
+    requestId: req.requestId,
   });
 });
 
@@ -342,8 +406,29 @@ async function initDatabase() {
 }
 
 initDatabase()
-  .then(() => app.listen(port, '0.0.0.0', () => console.log(`MeningoCheck/Ai listening on ${port}`)))
+  .then(() => {
+    app.listen(port, '0.0.0.0', () => {
+      log('info', 'server.started', { port, environment: process.env.NODE_ENV || 'development' });
+      const transport = smtpTransport();
+      if (!transport) {
+        log(production ? 'error' : 'warn', 'smtp.not_configured');
+      } else {
+        transport.verify()
+          .then(() => log('info', 'smtp.connection_verified', { host: process.env.SMTP_HOST, port: Number(process.env.SMTP_PORT || 587) }))
+          .catch((error) => log('error', 'smtp.connection_failed', {
+            errorCode: error.code,
+            errorName: error.name,
+            message: error.message,
+          }));
+      }
+    });
+  })
   .catch((error) => {
-    console.error('Database initialization failed', error);
+    log('error', 'database.initialization_failed', {
+      errorCode: error.code,
+      errorName: error.name,
+      message: error.message,
+      stack: error.stack,
+    });
     process.exit(1);
   });
