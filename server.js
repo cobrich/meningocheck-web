@@ -94,6 +94,10 @@ function smtpTransport() {
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT || 587),
     secure: String(process.env.SMTP_SECURE).toLowerCase() === 'true',
+    family: 4,
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
   });
 }
@@ -331,6 +335,13 @@ function publicError(error) {
   }
   if (error.context === 'smtp' && error.code === 'EAUTH') {
     return { status: 503, code: 'SMTP_AUTH_FAILED', message: 'Почтовый сервер отклонил авторизацию.' };
+  }
+  if (error.context === 'smtp' && ['ESOCKET', 'ETIMEDOUT', 'ECONNECTION'].includes(error.code)) {
+    return {
+      status: 503,
+      code: 'SMTP_CONNECTION_FAILED',
+      message: 'Сервер не может подключиться к почте. На бесплатном тарифе Render SMTP-порты заблокированы.',
+    };
   }
   if (error.context === 'smtp') {
     return { status: 503, code: 'SMTP_SEND_FAILED', message: 'Не удалось отправить письмо. Попробуйте позже.' };

@@ -32,7 +32,10 @@
   }
   input:focus, select:focus, textarea:focus { outline: 2px solid #2E86C1; outline-offset: 1px; }
   button { font-family: inherit; cursor: pointer; }
+  button:disabled { cursor: wait; }
   button:focus-visible, [data-nav]:focus-visible { outline: 3px solid #2E86C1; outline-offset: 3px; }
+  .spinner { display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:spin .7s linear infinite;vertical-align:-2px;margin-right:7px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
   #app { width: 100%; min-height: 100vh; display: flex; flex-direction: column; }
   .page-wrap { flex: 1; display: flex; flex-direction: column; align-items: center; width: 100%; padding: 0 0 40px; }
   .content-max { width: 100%; max-width: 460px; padding: 0 18px; margin: 0 auto; }
@@ -70,7 +73,7 @@ const SYMPTOMS = [
 const C = { p50:'#EAF3FC', p100:'#F4F9FE', border:'#C3DDF5', border2:'#8FC0EB', mid:'#3C86C7', strong:'#1B5FA0', dark:'#0C4478', darker:'#042C53', muted:'#7FA9D6', green:'#34A876', greenBg:'#E6F7EF' };
 
 let token = localStorage.getItem('meningocheck_token');
-let state = { page:'landing', step:0, age:'', gender:'', duration:'', symptoms:{}, other:'', history:[], user:null, pendingEmail:null, devCode:null, lastResult:null, authError:null, codeError:null };
+let state = { page:'landing', step:0, age:'', gender:'', duration:'', symptoms:{}, other:'', history:[], user:null, pendingEmail:null, devCode:null, lastResult:null, notice:null, authError:null, codeError:null };
 
 function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(); return d.firstChild; }
 function esc(value){ return String(value ?? '').replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c])); }
@@ -88,7 +91,11 @@ async function api(path, options={}){
   }
   return data;
 }
-function setBusy(button, busy){ button.disabled=busy; button.style.opacity=busy?'0.65':'1'; }
+function setBusy(button, busy, text='Отправляем...'){
+  if(!button.dataset.originalHtml) button.dataset.originalHtml=button.innerHTML;
+  button.disabled=busy; button.style.opacity=busy?'0.72':'1';
+  button.innerHTML=busy?`<span class="spinner"></span>${text}`:button.dataset.originalHtml;
+}
 async function loadHistory(){
   const data = await api('/api/assessments');
   state.history = data.assessments.map(a=>({...a, date:new Date(a.createdAt).toLocaleString('ru-RU')}));
@@ -225,6 +232,7 @@ function viewRegister(){
     try{
       const data = await api('/api/auth/register',{method:'POST',body:JSON.stringify({name,email,password})});
       state.pendingEmail = data.email; state.devCode = data.devCode || null;
+      state.notice = 'Код успешно отправлен. Проверьте входящие письма и папку «Спам».';
       state.authError = null; state.codeError = null; state.page='verify'; render();
     }catch(error){ state.authError=error.message; render(); }
   };
@@ -238,11 +246,12 @@ function viewVerify(){
       <i class="ti ti-mail" style="font-size:24px;color:${C.strong}"></i>
       <p style="color:${C.dark};font-weight:700;margin:10px 0 4px;font-size:14px;">Введите код подтверждения</p>
       <p style="font-size:11px;color:${C.mid};margin-bottom:16px;line-height:1.6;">Мы отправили 6-значный код на ${esc(email)}. Код действует 10 минут.</p>
+      ${state.notice ? `<p role="status" style="font-size:11px;color:#237653;margin-bottom:16px;line-height:1.6;background:${C.greenBg};border:1px solid #A9DFC8;border-radius:8px;padding:9px;">✓ ${esc(state.notice)}</p>` : ''}
       ${state.devCode ? `<p style="font-size:11px;color:${C.muted};margin-bottom:16px;line-height:1.6;background:${C.p100};border-radius:8px;padding:8px;">Локальный режим: код — <b style="color:${C.strong};letter-spacing:1px;">${state.devCode}</b></p>` : ''}
       <input id="code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" style="text-align:center;letter-spacing:6px;font-size:18px;font-weight:700;max-width:200px;margin:0 auto 8px;"/>
       ${state.codeError ? `<p style="color:#B3261E;font-size:11px;margin:4px 0 8px;">${esc(state.codeError)}</p>` : ''}
       <button id="confirm" style="background:${C.strong};color:#fff;border:none;padding:9px 20px;border-radius:10px;font-size:13px;font-weight:700;margin-top:6px;">Подтвердить</button>
-      <p style="font-size:11px;color:${C.mid};margin-top:12px;">Не пришёл код? <span id="resend" style="color:${C.strong};cursor:pointer;font-weight:600;">Отправить снова</span></p>
+      <p style="font-size:11px;color:${C.mid};margin-top:12px;">Не пришёл код? <button id="resend" style="color:${C.strong};cursor:pointer;font-weight:600;background:none;border:0;padding:0;font-size:inherit;">Отправить снова</button></p>
     </div>
   `);
   const w = card(inner);
@@ -258,8 +267,9 @@ function viewVerify(){
     }catch(error){ state.codeError=error.message; render(); }
   };
   w.querySelector('#resend').onclick = async ()=>{
-    try{ await api('/api/auth/resend',{method:'POST',body:JSON.stringify({email})}); state.codeError='Новый код отправлен.'; render(); }
-    catch(error){ state.codeError=error.message; render(); }
+    const button=w.querySelector('#resend'); setBusy(button,true,'Отправляем...');
+    try{ await api('/api/auth/resend',{method:'POST',body:JSON.stringify({email})}); state.notice='Новый код успешно отправлен.'; state.codeError=null; render(); }
+    catch(error){ state.notice=null; state.codeError=error.message; render(); }
   };
   return w;
 }
