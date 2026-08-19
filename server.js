@@ -106,6 +106,66 @@ function mailjetConfigured() {
   return Boolean(process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY);
 }
 
+function brevoConfigured() {
+  return Boolean(process.env.BREVO_API_KEY);
+}
+
+async function sendWithBrevo(email, code) {
+  if (!process.env.EMAIL_FROM) {
+    const error = new Error('EMAIL_FROM is not configured');
+    error.code = 'BREVO_NOT_CONFIGURED';
+    error.context = 'brevo';
+    throw error;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        Accept: 'application/json',
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        sender: {
+          email: process.env.EMAIL_FROM,
+          name: process.env.EMAIL_FROM_NAME || 'MeningoCheck/Ai',
+        },
+        to: [{ email }],
+        subject: 'Код подтверждения MeningoCheck/Ai',
+        textContent: `Ваш код подтверждения: ${code}. Код действует 10 минут.`,
+        htmlContent: `<p>Ваш код подтверждения:</p><p style="font-size:24px;font-weight:700;letter-spacing:4px">${code}</p><p>Код действует 10 минут.</p>`,
+        tags: ['email-verification'],
+      }),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.message || `Brevo returned HTTP ${response.status}`);
+      error.code = data.code || `HTTP_${response.status}`;
+      error.httpStatus = response.status;
+      error.context = 'brevo';
+      throw error;
+    }
+    log('info', 'brevo.message_sent', {
+      messageId: data.messageId,
+      recipientDomain: email.split('@')[1],
+    });
+    return true;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      error.code = 'BREVO_TIMEOUT';
+      error.message = 'Brevo API request timed out';
+    }
+    error.context = 'brevo';
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function sendWithMailjet(email, code) {
   if (!process.env.EMAIL_FROM) {
     const error = new Error('EMAIL_FROM is not configured');
@@ -168,6 +228,7 @@ async function sendWithMailjet(email, code) {
 }
 
 async function sendVerificationCode(email, code) {
+  if (brevoConfigured()) return sendWithBrevo(email, code);
   const hasAnyMailjetKey = Boolean(process.env.MAILJET_API_KEY || process.env.MAILJET_SECRET_KEY);
   if (mailjetConfigured()) return sendWithMailjet(email, code);
   if (hasAnyMailjetKey) {
@@ -403,6 +464,18 @@ app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] })
 app.get('*splat', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 function publicError(error) {
+  if (error.context === 'brevo' && error.code === 'BREVO_NOT_CONFIGURED') {
+    return { status: 503, code: 'BREVO_NOT_CONFIGURED', message: 'Сервис отправки писем настроен не полностью.' };
+  }
+  if (error.context === 'brevo' && [401, 403].includes(error.httpStatus)) {
+    return { status: 503, code: 'BREVO_AUTH_FAILED', message: 'Brevo отклонил API-ключ или доступ к отправке.' };
+  }
+  if (error.context === 'brevo' && /sender|from|verified|authenticate/i.test(error.message)) {
+    return { status: 503, code: 'BREVO_SENDER_REJECTED', message: 'Адрес отправителя не подтверждён в Brevo.' };
+  }
+  if (error.context === 'brevo') {
+    return { status: 503, code: 'BREVO_SEND_FAILED', message: 'Не удалось отправить письмо через Brevo. Попробуйте позже.' };
+  }
   if (error.context === 'mailjet' && error.code === 'MAILJET_NOT_CONFIGURED') {
     return { status: 503, code: 'MAILJET_NOT_CONFIGURED', message: 'Сервис отправки писем настроен не полностью.' };
   }
@@ -505,6 +578,12 @@ initDatabase()
   .then(() => {
     app.listen(port, '0.0.0.0', () => {
       log('info', 'server.started', { port, environment: process.env.NODE_ENV || 'development' });
+      if (brevoConfigured()) {
+        log('info', 'brevo.configured', {
+          senderDomain: String(process.env.EMAIL_FROM || '').split('@')[1] || 'missing',
+        });
+        return;
+      }
       if (mailjetConfigured()) {
         log('info', 'mailjet.configured', {
           senderDomain: String(process.env.EMAIL_FROM || '').split('@')[1] || 'missing',

@@ -33,6 +33,8 @@ services:
         sync: false
       - key: EMAIL_FROM_NAME
         value: MeningoCheck/Ai
+      - key: BREVO_API_KEY
+        sync: false
 
 databases:
   - name: meningocheck-db

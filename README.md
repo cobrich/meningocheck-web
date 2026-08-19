@@ -26,14 +26,14 @@ npm start
 1. Отправьте изменения в GitHub, GitLab или Bitbucket.
 2. В Render выберите **New → Blueprint** и подключите репозиторий.
 3. Render создаст Node Web Service и PostgreSQL из `render.yaml`.
-4. Для бесплатного Render заполните `MAILJET_API_KEY`, `MAILJET_SECRET_KEY`,
-   `EMAIL_FROM` и `EMAIL_FROM_NAME` в Render Dashboard. `EMAIL_FROM` должен быть
-   подтверждён в Mailjet.
+4. Для бесплатного Render заполните `BREVO_API_KEY`, `EMAIL_FROM` и
+   `EMAIL_FROM_NAME` в Render Dashboard. `EMAIL_FROM` должен быть подтверждён
+   как sender в Brevo.
 
 > Render блокирует исходящие SMTP-порты 25, 465 и 587 на бесплатных Web
-> Services. Для SMTP требуется платный instance. На бесплатном instance вместо
-> SMTP приложение использует Mailjet Send API через HTTPS. SMTP остаётся
-> резервным вариантом для локальной разработки или платного Render instance.
+> Services. На бесплатном instance приложение отправляет письма через Brevo
+> HTTPS API. Если `BREVO_API_KEY` отсутствует, используются Mailjet, затем SMTP
+> как резервные варианты.
 
 ## Ограничения демо
 
