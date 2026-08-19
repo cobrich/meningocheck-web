@@ -102,7 +102,80 @@ function smtpTransport() {
   });
 }
 
+function mailjetConfigured() {
+  return Boolean(process.env.MAILJET_API_KEY && process.env.MAILJET_SECRET_KEY);
+}
+
+async function sendWithMailjet(email, code) {
+  if (!process.env.EMAIL_FROM) {
+    const error = new Error('EMAIL_FROM is not configured');
+    error.code = 'MAILJET_NOT_CONFIGURED';
+    error.context = 'mailjet';
+    throw error;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const authorization = Buffer.from(
+      `${process.env.MAILJET_API_KEY}:${process.env.MAILJET_SECRET_KEY}`,
+    ).toString('base64');
+    const response = await fetch('https://api.mailjet.com/v3.1/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${authorization}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        Messages: [{
+          From: {
+            Email: process.env.EMAIL_FROM,
+            Name: process.env.EMAIL_FROM_NAME || 'MeningoCheck/Ai',
+          },
+          To: [{ Email: email }],
+          Subject: 'Код подтверждения MeningoCheck/Ai',
+          TextPart: `Ваш код подтверждения: ${code}. Код действует 10 минут.`,
+          HTMLPart: `<p>Ваш код подтверждения:</p><p style="font-size:24px;font-weight:700;letter-spacing:4px">${code}</p><p>Код действует 10 минут.</p>`,
+        }],
+      }),
+      signal: controller.signal,
+    });
+    const data = await response.json().catch(() => ({}));
+    const message = data.Messages?.[0];
+    if (!response.ok || message?.Status !== 'success') {
+      const details = message?.Errors?.[0] || data;
+      const error = new Error(details.ErrorMessage || `Mailjet returned HTTP ${response.status}`);
+      error.code = details.ErrorCode || `HTTP_${response.status}`;
+      error.httpStatus = response.status;
+      error.context = 'mailjet';
+      throw error;
+    }
+    log('info', 'mailjet.message_sent', {
+      messageId: message.To?.[0]?.MessageID,
+      recipientDomain: email.split('@')[1],
+    });
+    return true;
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      error.code = 'MAILJET_TIMEOUT';
+      error.message = 'Mailjet API request timed out';
+    }
+    error.context = 'mailjet';
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function sendVerificationCode(email, code) {
+  const hasAnyMailjetKey = Boolean(process.env.MAILJET_API_KEY || process.env.MAILJET_SECRET_KEY);
+  if (mailjetConfigured()) return sendWithMailjet(email, code);
+  if (hasAnyMailjetKey) {
+    const error = new Error('Mailjet API credentials are incomplete');
+    error.code = 'MAILJET_NOT_CONFIGURED';
+    error.context = 'mailjet';
+    throw error;
+  }
   const transport = smtpTransport();
   if (!transport) {
     if (production) {
@@ -330,6 +403,18 @@ app.use(express.static(path.join(__dirname, 'public'), { extensions: ['html'] })
 app.get('*splat', (_req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 function publicError(error) {
+  if (error.context === 'mailjet' && error.code === 'MAILJET_NOT_CONFIGURED') {
+    return { status: 503, code: 'MAILJET_NOT_CONFIGURED', message: 'Сервис отправки писем настроен не полностью.' };
+  }
+  if (error.context === 'mailjet' && (error.httpStatus === 401 || error.code === 'mj-0015')) {
+    return { status: 503, code: 'MAILJET_AUTH_FAILED', message: 'Mailjet отклонил API-ключи.' };
+  }
+  if (error.context === 'mailjet' && (error.httpStatus === 403 || error.code === 'send-0008')) {
+    return { status: 503, code: 'MAILJET_SENDER_REJECTED', message: 'Адрес отправителя не подтверждён в Mailjet.' };
+  }
+  if (error.context === 'mailjet') {
+    return { status: 503, code: 'MAILJET_SEND_FAILED', message: 'Не удалось отправить письмо через Mailjet. Попробуйте позже.' };
+  }
   if (error.code === 'SMTP_NOT_CONFIGURED') {
     return { status: 503, code: 'SMTP_NOT_CONFIGURED', message: 'Отправка почты пока не настроена.' };
   }
@@ -420,6 +505,12 @@ initDatabase()
   .then(() => {
     app.listen(port, '0.0.0.0', () => {
       log('info', 'server.started', { port, environment: process.env.NODE_ENV || 'development' });
+      if (mailjetConfigured()) {
+        log('info', 'mailjet.configured', {
+          senderDomain: String(process.env.EMAIL_FROM || '').split('@')[1] || 'missing',
+        });
+        return;
+      }
       const transport = smtpTransport();
       if (!transport) {
         log(production ? 'error' : 'warn', 'smtp.not_configured');

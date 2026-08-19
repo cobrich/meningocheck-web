@@ -26,13 +26,14 @@ npm start
 1. Отправьте изменения в GitHub, GitLab или Bitbucket.
 2. В Render выберите **New → Blueprint** и подключите репозиторий.
 3. Render создаст Node Web Service и PostgreSQL из `render.yaml`.
-4. Заполните секретные переменные `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS` и
-   `SMTP_FROM` в Render Dashboard. Для порта 465 также задайте
-   `SMTP_PORT=465` и `SMTP_SECURE=true`.
+4. Для бесплатного Render заполните `MAILJET_API_KEY`, `MAILJET_SECRET_KEY`,
+   `EMAIL_FROM` и `EMAIL_FROM_NAME` в Render Dashboard. `EMAIL_FROM` должен быть
+   подтверждён в Mailjet.
 
 > Render блокирует исходящие SMTP-порты 25, 465 и 587 на бесплатных Web
 > Services. Для SMTP требуется платный instance. На бесплатном instance вместо
-> SMTP необходимо использовать почтовый сервис с HTTPS API.
+> SMTP приложение использует Mailjet Send API через HTTPS. SMTP остаётся
+> резервным вариантом для локальной разработки или платного Render instance.
 
 ## Ограничения демо
 

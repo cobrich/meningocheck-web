@@ -25,6 +25,14 @@ services:
         sync: false
       - key: SMTP_FROM
         sync: false
+      - key: MAILJET_API_KEY
+        sync: false
+      - key: MAILJET_SECRET_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_FROM_NAME
+        value: MeningoCheck/Ai
 
 databases:
   - name: meningocheck-db
